@@ -38,14 +38,20 @@ export const authAPI = {
 
 // Orders
 export const orderAPI = {
-  create: (data) => api.post('/orders', data, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // FIX: create now sends JSON (documents array with S3 url) not FormData
+  create: (data) => api.post('/orders', data),
   getAll: () => api.get('/orders'),
   getById: (id) => api.get(`/orders/${id}`),
-  updateStatus: (id, status) => api.put(`/orders/${id}/status`, { status }),
+  // FIX: was api.put — backend route is PATCH
+  updateStatus: (id, status) => api.patch(`/orders/${id}/status`, { status }),
   cancel: (id) => api.delete(`/orders/${id}`),
   getMyOrders: () => api.get('/orders/my-orders'),
-  verifyPickup: (id, data) => api.post(`/orders/${id}/verify-pickup`, data),
+  verifyPickup: (data) => api.post('/orders/verify-pickup', data),
   extendExpiry: (id) => api.post(`/orders/${id}/extend-expiry`),
+  accept: (id) => api.patch(`/orders/${id}/accept`),
+  reject: (id, reason) => api.patch(`/orders/${id}/reject`, { reason }),
+  // Shopkeeper: get signed S3 URL to download + print the document
+  getDocumentUrl: (orderId, docId) => api.get(`/orders/${orderId}/documents/${docId}/url`),
 };
 
 // Shops
@@ -57,13 +63,23 @@ export const shopAPI = {
   delete: (id) => api.delete(`/shops/${id}`),
   getMyShop: () => api.get('/shops/my-shop'),
   updatePricing: (id, data) => api.put(`/shops/${id}/pricing`, data),
-  getShopOrders: () => api.get('/shops/orders'),
+  getShopOrders: () => api.get('/orders/shop/orders'),
 };
 
 // Payments
 export const paymentAPI = {
-  createOrder: (data) => api.post('/payments/create-order', data),
+  // FIX: removed broken createOrder call — razorpay data comes from orderAPI.create()
   verify: (data) => api.post('/payments/verify', data),
+};
+
+// Upload — call this FIRST before placing order, get S3 url back
+export const uploadAPI = {
+  uploadFile: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  getSignedUrl: (key) => api.get(`/upload/signed-url/${key}`),
 };
 
 // Admin
@@ -75,16 +91,6 @@ export const adminAPI = {
   updateMargin: (data) => api.put('/admin/margin', data),
   approveShop: (id) => api.put(`/admin/shops/${id}/approve`),
   blockUser: (id) => api.put(`/admin/users/${id}/block`),
-};
-
-// Upload
-export const uploadAPI = {
-  uploadFile: (file) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    return api.post('/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-  },
-  getSignedUrl: (key) => api.get(`/upload/signed-url/${key}`),
 };
 
 export default api;

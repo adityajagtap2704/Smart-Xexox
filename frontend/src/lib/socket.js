@@ -29,8 +29,9 @@ export const joinOrderRoom = (orderId) => {
 
 export const onOrderUpdate = (callback) => {
   const s = getSocket();
-  s.on('order-update', callback);
-  return () => { s.off('order-update', callback); };
+  // FIX: was 'order-update', backend emits 'order:status_update'
+  s.on('order:status_update', callback);
+  return () => { s.off('order:status_update', callback); };
 };
 
 export const onNotification = (callback) => {

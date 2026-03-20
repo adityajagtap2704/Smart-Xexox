@@ -1,24 +1,40 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { orderAPI, shopAPI, paymentAPI } from '@/lib/api';
+import { orderAPI, shopAPI, paymentAPI, uploadAPI } from '@/lib/api';
 import { onOrderUpdate, joinOrderRoom } from '@/lib/socket';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 import { motion } from 'framer-motion';
-import { Upload, FileText, Package, X } from 'lucide-react';
+import { Upload, FileText, Package, X, Loader2 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import Navbar from '@/components/layout/Navbar';
 import Footer from '@/components/layout/Footer';
 
+// FIX: added pending_payment and paid statuses
 const statusColors = {
-  pending: 'bg-warning/10 text-warning',
-  accepted: 'bg-info/10 text-info',
-  printing: 'bg-primary/10 text-primary',
-  ready: 'bg-success/10 text-success',
-  completed: 'bg-success/10 text-success',
-  cancelled: 'bg-destructive/10 text-destructive',
+  pending_payment: 'bg-yellow-100 text-yellow-800',
+  paid:            'bg-blue-100 text-blue-800',
+  accepted:        'bg-indigo-100 text-indigo-800',
+  printing:        'bg-purple-100 text-purple-800',
+  ready:           'bg-green-100 text-green-800',
+  completed:       'bg-green-200 text-green-900',
+  picked_up:       'bg-gray-100 text-gray-700',
+  cancelled:       'bg-red-100 text-red-800',
+  rejected:        'bg-red-100 text-red-800',
+};
+
+const statusLabels = {
+  pending_payment: 'Awaiting Payment',
+  paid:            'Paid – Queued',
+  accepted:        'Accepted',
+  printing:        'Printing...',
+  ready:           'Ready for Pickup!',
+  completed:       'Completed',
+  picked_up:       'Picked Up',
+  cancelled:       'Cancelled',
+  rejected:        'Rejected',
 };
 
 const UserDashboard = () => {
@@ -37,18 +53,19 @@ const UserDashboard = () => {
   const [selectedShop, setSelectedShop] = useState('');
   const [doubleSided, setDoubleSided] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
 
   const fetchOrders = useCallback(async () => {
     try {
       const res = await orderAPI.getMyOrders();
-      setOrders(res.data.orders || res.data || []);
+      setOrders(res.data.data?.orders || res.data.orders || res.data || []);
     } catch { /* */ }
   }, []);
 
   const fetchShops = useCallback(async () => {
     try {
       const res = await shopAPI.getAll();
-      setShops(res.data.shops || res.data || []);
+      setShops(res.data.data?.shops || res.data.shops || res.data || []);
     } catch { /* */ }
   }, []);
 
@@ -56,10 +73,18 @@ const UserDashboard = () => {
     Promise.all([fetchOrders(), fetchShops()]).finally(() => setLoading(false));
   }, [fetchOrders, fetchShops]);
 
+  // FIX: listen to correct socket event 'order:status_update'
+  // also update the selectedOrder if it's open so modal shows new status live
   useEffect(() => {
     const cleanup = onOrderUpdate((data) => {
-      setOrders((prev) => prev.map((o) => (o._id === data.orderId ? { ...o, status: data.status } : o)));
-      toast.info(`Order updated: ${data.status}`);
+      setOrders((prev) =>
+        prev.map((o) => (o._id === data.orderId ? { ...o, status: data.status } : o))
+      );
+      setSelectedOrder((prev) =>
+        prev && prev._id === data.orderId ? { ...prev, status: data.status } : prev
+      );
+      const label = statusLabels[data.status] || data.status;
+      toast.info(`Order status updated: ${label}`);
     });
     return cleanup;
   }, []);
@@ -72,52 +97,79 @@ const UserDashboard = () => {
     }
     setSubmitting(true);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('copies', copies.toString());
-      formData.append('colorType', colorType);
-      formData.append('paperSize', paperSize);
-      formData.append('shopId', selectedShop);
-      formData.append('doubleSided', doubleSided.toString());
+      // STEP 1: Upload file to S3 first
+      setUploadProgress('Uploading document...');
+      const uploadRes = await uploadAPI.uploadFile(file);
+      const uploadedDoc = uploadRes.data.data || uploadRes.data;
+      // uploadedDoc should have: fileUrl, fileName, fileKey, pages, fileSize
 
-      const res = await orderAPI.create(formData);
-      const order = res.data.order || res.data;
+      // STEP 2: Create order with the S3 document info + razorpay order is returned
+      setUploadProgress('Creating order...');
+      const orderRes = await orderAPI.create({
+        shopId: selectedShop,
+        documents: [
+          {
+            fileUrl: uploadedDoc.fileUrl || uploadedDoc.url,
+            fileKey: uploadedDoc.fileKey || uploadedDoc.key,
+            fileName: file.name,
+            fileSize: file.size,
+            pages: uploadedDoc.pages || 1,
+            colorType,
+            paperSize,
+            copies,
+            doubleSided,
+          },
+        ],
+      });
 
-      if (order.totalCost && order.totalCost > 0) {
-        try {
-          const payRes = await paymentAPI.createOrder({ amount: order.totalCost, orderId: order._id });
-          const razorpayOrder = payRes.data;
+      const { order, razorpay } = orderRes.data.data;
 
-          const options = {
-            key: import.meta.env.VITE_RAZORPAY_KEY || 'rzp_test_key',
-            amount: razorpayOrder.amount,
-            currency: 'INR',
-            name: 'Smart Xerox',
-            description: 'Document Printing',
-            order_id: razorpayOrder.id,
-            handler: async (response) => {
-              await paymentAPI.verify({
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-                orderId: order._id,
-              });
-              toast.success('Payment successful!');
-              fetchOrders();
-              setActiveTab('orders');
+      // STEP 3: Open Razorpay with data returned from backend
+      setUploadProgress('Opening payment...');
+      const options = {
+        key: razorpay.key,              // comes from backend (process.env.RAZORPAY_KEY_ID)
+        amount: razorpay.amount,        // in paise, e.g. 500 = ₹5
+        currency: razorpay.currency,
+        name: 'Smart Xerox',
+        description: 'Document Printing',
+        order_id: razorpay.orderId,     // Razorpay order id from backend
+        // UPI only — on mobile shows GPay/PhonePe/Paytm apps
+        // on PC/laptop shows QR code automatically (no extra code needed)
+        config: {
+          display: {
+            blocks: {
+              upi: { name: 'Pay via UPI', instruments: [{ method: 'upi' }] },
             },
-            prefill: { name: user?.name, email: user?.email, contact: user?.phone },
-          };
-          const rzp = new window.Razorpay(options);
-          rzp.open();
-        } catch {
-          toast.error('Payment initiation failed');
-        }
-      } else {
-        toast.success('Order placed successfully!');
-        fetchOrders();
-        setActiveTab('orders');
-      }
+            sequence: ['block.upi'],
+            preferences: { show_default_blocks: false },
+          },
+        },
+        handler: async (response) => {
+          // Payment successful — verify on backend
+          try {
+            await paymentAPI.verify({
+              razorpayOrderId: response.razorpay_order_id,
+              razorpayPaymentId: response.razorpay_payment_id,
+              razorpaySignature: response.razorpay_signature,
+            });
+            toast.success('Payment successful! Order placed.');
+            fetchOrders();
+            setActiveTab('orders');
+          } catch {
+            toast.error('Payment verification failed. Contact support.');
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            toast.error('Payment cancelled. Your order is still saved — you can pay later.');
+          },
+        },
+        prefill: { name: user?.name, email: user?.email, contact: user?.phone },
+        theme: { color: '#f97316' },
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.open();
 
       setFile(null);
       setCopies(1);
@@ -125,6 +177,7 @@ const UserDashboard = () => {
       toast.error(err.response?.data?.message || 'Failed to place order');
     } finally {
       setSubmitting(false);
+      setUploadProgress('');
     }
   };
 
@@ -226,7 +279,12 @@ const UserDashboard = () => {
               </div>
 
               <Button type="submit" className="w-full sunrise-gradient text-primary-foreground sunrise-shadow-sm" disabled={submitting}>
-                {submitting ? 'Placing Order...' : 'Place Order & Pay'}
+                {submitting ? (
+                  <span className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {uploadProgress || 'Processing...'}
+                  </span>
+                ) : 'Place Order & Pay'}
               </Button>
             </form>
           </motion.div>
@@ -258,15 +316,19 @@ const UserDashboard = () => {
                         <FileText className="h-5 w-5 text-primary" />
                       </div>
                       <div>
-                        <p className="font-medium text-sm">{order.fileName || `Order #${order._id.slice(-6)}`}</p>
+                        <p className="font-medium text-sm">
+                          {order.documents?.[0]?.fileName || `Order #${order._id.slice(-6)}`}
+                        </p>
                         <p className="text-xs text-muted-foreground">{new Date(order.createdAt).toLocaleDateString()}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       <span className={`rounded-full px-3 py-1 text-xs font-medium ${statusColors[order.status] || 'bg-muted text-muted-foreground'}`}>
-                        {order.status}
+                        {statusLabels[order.status] || order.status}
                       </span>
-                      {order.totalCost && <span className="font-heading font-bold text-primary">₹{order.totalCost}</span>}
+                      {order.pricing?.total && (
+                        <span className="font-heading font-bold text-primary">₹{order.pricing.total}</span>
+                      )}
                     </div>
                   </div>
                 </motion.div>
@@ -289,25 +351,51 @@ const UserDashboard = () => {
                 <button onClick={() => setSelectedOrder(null)}><X className="h-5 w-5" /></button>
               </div>
               <div className="space-y-3 text-sm">
-                <div className="flex justify-between"><span className="text-muted-foreground">Order ID</span><span className="font-medium">#{selectedOrder._id.slice(-8)}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Status</span><span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusColors[selectedOrder.status]}`}>{selectedOrder.status}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Copies</span><span>{selectedOrder.copies}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Color</span><span>{selectedOrder.colorType}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Paper</span><span>{selectedOrder.paperSize}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Cost</span><span className="font-bold text-primary">₹{selectedOrder.totalCost}</span></div>
-                {selectedOrder.shopId && (
-                  <div className="flex justify-between"><span className="text-muted-foreground">Shop</span><span>{selectedOrder.shopId.name}</span></div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Order Number</span>
+                  <span className="font-medium">#{selectedOrder.orderNumber || selectedOrder._id.slice(-8)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Status</span>
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusColors[selectedOrder.status] || ''}`}>
+                    {statusLabels[selectedOrder.status] || selectedOrder.status}
+                  </span>
+                </div>
+                {selectedOrder.documents?.[0] && (
+                  <>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Copies</span><span>{selectedOrder.documents[0].copies}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Color</span><span>{selectedOrder.documents[0].colorType}</span></div>
+                    <div className="flex justify-between"><span className="text-muted-foreground">Paper</span><span>{selectedOrder.documents[0].paperSize}</span></div>
+                  </>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Cost</span>
+                  <span className="font-bold text-primary">₹{selectedOrder.pricing?.total}</span>
+                </div>
+                {selectedOrder.shop && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Shop</span>
+                    <span>{selectedOrder.shop?.name}</span>
+                  </div>
                 )}
               </div>
-              {selectedOrder.pickupCode && (
-                <div className="mt-6 text-center">
-                  <p className="text-sm text-muted-foreground mb-2">Pickup Code</p>
-                  <p className="font-heading text-3xl font-bold text-primary tracking-wider">{selectedOrder.pickupCode}</p>
+
+              {/* Pickup code — shown when ready */}
+              {selectedOrder.pickup?.pickupCode && (
+                <div className="mt-6 rounded-xl bg-green-50 border border-green-200 p-4 text-center">
+                  <p className="text-sm text-green-700 font-medium mb-1">Your Pickup Code</p>
+                  <p className="font-heading text-4xl font-bold text-green-700 tracking-widest">
+                    {selectedOrder.pickup.pickupCode}
+                  </p>
+                  <p className="text-xs text-green-600 mt-2">Show this code at the shop counter</p>
                 </div>
               )}
-              {(selectedOrder.qrCode || selectedOrder.status === 'ready') && (
-                <div className="mt-4 flex justify-center">
-                  <QRCodeSVG value={selectedOrder.qrCode || selectedOrder._id} size={160} />
+
+              {/* QR code — shown when ready */}
+              {selectedOrder.status === 'ready' && selectedOrder.pickup?.qrCode && (
+                <div className="mt-4 flex flex-col items-center gap-2">
+                  <p className="text-sm text-muted-foreground">Or scan QR at shop</p>
+                  <QRCodeSVG value={selectedOrder.pickup.qrCode} size={160} />
                 </div>
               )}
             </motion.div>

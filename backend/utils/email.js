@@ -57,6 +57,41 @@ const emailTemplates = {
       </div>
     `,
   }),
+
+  // FIX: New template — sent to user when shop marks order as ready
+  orderReady: ({ name, orderNumber, pickupCode, shopName, shopAddress }) => ({
+    subject: `Your Order is Ready for Pickup! ✅ - Smart Xerox`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); padding: 30px; border-radius: 10px 10px 0 0; text-align: center;">
+          <h1 style="color: white; margin: 0;">✅ Order Ready!</h1>
+          <p style="color: rgba(255,255,255,0.9);">Your documents are printed and waiting</p>
+        </div>
+        <div style="background: white; padding: 30px; border: 1px solid #eee; border-top: none;">
+          <h2>Hello ${name}!</h2>
+          <p>Your order <strong>#${orderNumber}</strong> is ready for pickup at <strong>${shopName}</strong>.</p>
+          ${shopAddress ? `<p style="color: #555;">📍 ${shopAddress}</p>` : ''}
+
+          <div style="background: #f0fff4; border: 2px solid #38a169; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+            <p style="margin: 0 0 8px 0; font-size: 14px; color: #276749; font-weight: bold;">YOUR PICKUP OTP</p>
+            <span style="font-size: 48px; font-weight: bold; letter-spacing: 12px; color: #22543d;">${pickupCode}</span>
+            <p style="margin: 8px 0 0 0; font-size: 13px; color: #48bb78;">Show this OTP to the shopkeeper</p>
+          </div>
+
+          <p style="color: #555; font-size: 14px;">
+            The shopkeeper will verify this OTP and hand over your documents. 
+            Keep this code ready on your phone.
+          </p>
+          <p style="color: #dc3545; font-size: 13px;">
+            ⚠️ Do not share this OTP with anyone other than the shop counter.
+          </p>
+        </div>
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 0 0 10px 10px; text-align: center;">
+          <p style="color: #6c757d; font-size: 12px; margin: 0;">© ${new Date().getFullYear()} Smart Xerox. All rights reserved.</p>
+        </div>
+      </div>
+    `,
+  }),
 };
 
 const sendEmail = async ({ to, subject, template, data, html }) => {
@@ -68,7 +103,7 @@ const sendEmail = async ({ to, subject, template, data, html }) => {
   try {
     const transport = getTransporter();
     const templateContent = template ? emailTemplates[template]?.(data) : { subject, html };
-    
+
     await transport.sendMail({
       from: process.env.EMAIL_FROM || 'Smart Xerox <noreply@smartxerox.com>',
       to,
