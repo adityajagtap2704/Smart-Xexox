@@ -26,8 +26,7 @@ A full-stack production-grade web application that connects users with nearby pr
 ```
 smart-xerox/
 ├── frontend/               ← React 18 + Vite + Tailwind CSS
-└── backend/
-    └── smart-xerox-backend/  ← Node.js + Express + MongoDB
+└── backend/                ← Node.js + Express + MongoDB
 ```
 
 ---
